@@ -139,6 +139,8 @@ class VC1Encoder(nn.Module):
         observation_space: spaces.Dict,
         name: str = model_utils.VC1_LARGE_NAME,
         device: str = "cuda",
+        fp_16: bool = False,
+        bf_16: bool = False,
     ):
         super().__init__()
 
@@ -146,6 +148,8 @@ class VC1Encoder(nn.Module):
         self.backbone_name = name
         self.device = device
         self.rgb = "rgb" in observation_space.spaces
+        self.fp_16 = fp_16
+        self.bf_16 = bf_16
 
         if not self.is_blind:
             model, _, model_transforms, _ = model_utils.load_model(name)
@@ -181,23 +185,27 @@ class VC1Encoder(nn.Module):
         cnn_input = []
         rgb_observations = observations["rgb"]
 
-        rgb_observations = rgb_observations.permute(
-            0, 3, 1, 2
-        ).float()
+        if not self.fp_16 and not self.bf_16:
+            rgb_observations = rgb_observations.permute(
+                0, 3, 1, 2
+            ).float()
+        elif self.fp_16:
+            rgb_observations = rgb_observations.permute(
+                0, 3, 1, 2
+            ).half()
+        else:
+            rgb_observations = rgb_observations.permute(
+                0, 3, 1, 2
+            ).to(torch.bfloat16)
         rgb_observations = torch.stack(
             [self.model_transforms(rgb_image) for rgb_image in rgb_observations]
         )  # [BATCH x CHANNEL x HEIGHT X WIDTH] in torch.float32
         rgb_x = self.backbone(rgb_observations)
 
-        # if ImageGoalSensor.cls_uuid in observations:
-        #     # Split them back out
-        #     if self.using_both_clip_avg_attn_pool:
-        #         rgb_x, goal_x = rgb_x
-        #     else:
-        #         rgb_x, goal_x = rgb_x[:, :-1024], rgb_x[:, -1024:]
-        #     cnn_input.append(goal_x.type(torch.float32))
-
-        cnn_input.append(rgb_x.type(torch.float32))
+        if not self.bf_16 and not self.fp_16:
+            cnn_input.append(rgb_x.type(torch.float32))
+        else:
+            cnn_input.append(rgb_x)
 
         x = torch.cat(cnn_input, dim=1)
 
@@ -221,11 +229,15 @@ class PointNavVC1Net(Net):
         fuse_keys: Optional[List[str]],
         force_blind_policy: bool = False,
         discrete_actions: bool = True,
+        fp_16: bool = False,
+        bf_16: bool = True,
     ):
         super().__init__()
         self.prev_action_embedding: nn.Module
         self.discrete_actions = discrete_actions
         self._n_prev_action = 32
+        self.fp_16 = fp_16
+        self.bf_16 = bf_16
         if discrete_actions:
             self.prev_action_embedding = nn.Embedding(
                 action_space.n + 1, self._n_prev_action
@@ -276,6 +288,10 @@ class PointNavVC1Net(Net):
                 + 1
             )
             self.tgt_embeding = nn.Linear(n_input_goal, 32)
+            if self.fp_16:
+                self.tgt_embeding.half()
+            elif self.bf_16:
+                self.tgt_embeding.to(torch.bfloat16)
             rnn_input_size += 32
 
         if ObjectGoalSensor.cls_uuid in observation_space.spaces:
@@ -295,6 +311,10 @@ class PointNavVC1Net(Net):
                 EpisodicGPSSensor.cls_uuid
             ].shape[0]
             self.gps_embedding = nn.Linear(input_gps_dim, 32)
+            if self.fp_16:
+                self.gps_embedding.half()
+            elif self.bf_16:
+                self.gps_embedding.to(torch.bfloat16)
             rnn_input_size += 32
 
         if PointGoalSensor.cls_uuid in observation_space.spaces:
@@ -302,6 +322,10 @@ class PointNavVC1Net(Net):
                 PointGoalSensor.cls_uuid
             ].shape[0]
             self.pointgoal_embedding = nn.Linear(input_pointgoal_dim, 32)
+            if self.fp_16:
+                self.pointgoal_embedding.half()
+            elif self.bf_16:
+                self.pointgoal_embedding.to(torch.bfloat16)
             rnn_input_size += 32
 
         if HeadingSensor.cls_uuid in observation_space.spaces:
@@ -310,6 +334,10 @@ class PointNavVC1Net(Net):
             )
             assert input_heading_dim == 2, "Expected heading with 2D rotation."
             self.heading_embedding = nn.Linear(input_heading_dim, 32)
+            if self.fp_16:
+                self.heading_embedding.half()
+            elif self.bf_16:
+                self.heading_embedding.to(torch.bfloat16)
             rnn_input_size += 32
 
         if ProximitySensor.cls_uuid in observation_space.spaces:
@@ -317,6 +345,10 @@ class PointNavVC1Net(Net):
                 ProximitySensor.cls_uuid
             ].shape[0]
             self.proximity_embedding = nn.Linear(input_proximity_dim, 32)
+            if self.fp_16:
+                self.proximity_embedding.half()
+            elif self.bf_16:
+                self.proximity_embedding.to(torch.bfloat16)
             rnn_input_size += 32
 
         if EpisodicCompassSensor.cls_uuid in observation_space.spaces:
@@ -328,6 +360,10 @@ class PointNavVC1Net(Net):
             ), "Expected compass with 2D rotation."
             input_compass_dim = 2  # cos and sin of the angle
             self.compass_embedding = nn.Linear(input_compass_dim, 32)
+            if self.fp_16:
+                self.compass_embedding.half()
+            if self.bf_16:
+                self.compass_embedding.to(torch.bfloat16)
             rnn_input_size += 32
 
         for uuid in [
@@ -341,7 +377,13 @@ class PointNavVC1Net(Net):
                 )
                 goal_visual_encoder = VC1Encoder(
                     goal_observation_space,
+                    fp_16=self.fp_16,
+                    bf_16=self.bf_16,
                 )
+                if self.fp_16:
+                    goal_visual_encoder.half()
+                elif self.bf_16:
+                    goal_visual_encoder.to(torch.bfloat16)
                 setattr(self, f"{uuid}_encoder", goal_visual_encoder)
 
                 goal_visual_fc = nn.Sequential(
@@ -350,6 +392,10 @@ class PointNavVC1Net(Net):
                     ),
                     nn.ReLU(True),
                 )
+                if self.fp_16:
+                    goal_visual_fc.half()
+                elif self.bf_16:
+                    goal_visual_fc.to(torch.bfloat16)
                 setattr(self, f"{uuid}_fc", goal_visual_fc)
 
                 rnn_input_size += hidden_size
@@ -360,6 +406,10 @@ class PointNavVC1Net(Net):
                 nn.Linear(1024, hidden_size),
                 nn.ReLU(True),
             )
+            if self.fp_16:
+                goal_visual_fc.half()
+            elif self.bf_16:
+                goal_visual_fc.to(torch.bfloat16)
             setattr(self, f"{CacheImageGoalSensor.cls_uuid}_fc", goal_visual_fc)
             rnn_input_size += hidden_size
                 
@@ -379,8 +429,13 @@ class PointNavVC1Net(Net):
 
             self.visual_encoder = VC1Encoder(
                 use_obs_space,
+                fp_16=self.fp_16,
+                bf_16=self.bf_16,
             )
-
+            if self.fp_16:
+                self.visual_encoder.half()
+            elif self.bf_16:
+                self.visual_encoder.to(torch.bfloat16)
             if not self.visual_encoder.is_blind:
                 self.visual_fc = nn.Sequential(
                     nn.Flatten(),
@@ -389,6 +444,10 @@ class PointNavVC1Net(Net):
                     ),
                     nn.ReLU(True),
                 )
+                if self.fp_16:
+                    self.visual_fc.half()
+                elif self.bf_16:
+                    self.visual_fc.to(torch.bfloat16)
 
         self.state_encoder = build_rnn_state_encoder(
             (0 if self.is_blind else self._hidden_size) + rnn_input_size,
@@ -439,23 +498,47 @@ class PointNavVC1Net(Net):
                 visual_feats = observations[
                     PointNavResNetNet.PRETRAINED_VISUAL_FEATURES_KEY
                 ]
+                if self.fp_16:
+                    visual_feats = visual_feats.half()
+                elif self.bf_16:
+                    visual_feats = visual_feats.to(torch.bfloat16)
             else:
-                visual_feats = self.visual_encoder(observations)
+                if self.fp_16:
+                    rgb_input = observations["rgb"].half()
+                    visual_feats = self.visual_encoder({"rgb": rgb_input}).half()
+                elif self.bf_16:
+                    rgb_input = observations["rgb"].to(torch.bfloat16)
+                    visual_feats = self.visual_encoder({"rgb": rgb_input})
+                else:
+                    visual_feats = self.visual_encoder(observations)
 
             visual_feats = self.visual_fc(visual_feats)
             aux_loss_state["perception_embed"] = visual_feats
             x.append(visual_feats)
 
         if len(self._fuse_keys_1d) != 0:
-            fuse_states = torch.cat(
-                [observations[k] for k in self._fuse_keys_1d], dim=-1
-            )
+            if self.fp_16:
+                fuse_states = torch.cat(
+                    [observations[k].half() for k in self._fuse_keys_1d], dim=-1
+                )
+            elif self.bf_16:
+                fuse_states = torch.cat(
+                    [observations[k].to(torch.bfloat16) for k in self._fuse_keys_1d], dim=-1
+                )
+            else:
+                fuse_states = torch.cat(
+                    [observations[k] for k in self._fuse_keys_1d], dim=-1
+                )
             x.append(fuse_states.float())
 
         if IntegratedPointGoalGPSAndCompassSensor.cls_uuid in observations:
             goal_observations = observations[
                 IntegratedPointGoalGPSAndCompassSensor.cls_uuid
             ]
+            if self.fp_16:
+                goal_observations = goal_observations.half()
+            elif self.bf_16:
+                goal_observations = goal_observations.to(torch.bfloat16)
             if goal_observations.shape[1] == 2:
                 # Polar Dimensionality 2
                 # 2D polar transform
@@ -490,14 +573,26 @@ class PointNavVC1Net(Net):
 
         if PointGoalSensor.cls_uuid in observations:
             goal_observations = observations[PointGoalSensor.cls_uuid]
+            if self.fp_16:
+                goal_observations = goal_observations.half()
+            elif self.bf_16:
+                goal_observations = goal_observations.to(torch.bfloat16)
             x.append(self.pointgoal_embedding(goal_observations))
 
         if ProximitySensor.cls_uuid in observations:
             sensor_observations = observations[ProximitySensor.cls_uuid]
+            if self.fp_16:
+                sensor_observations = sensor_observations.half()
+            elif self.bf_16:
+                sensor_observations = sensor_observations.to(torch.bfloat16)
             x.append(self.proximity_embedding(sensor_observations))
 
         if HeadingSensor.cls_uuid in observations:
             sensor_observations = observations[HeadingSensor.cls_uuid]
+            if self.fp_16:
+                sensor_observations = sensor_observations.half()
+            elif self.bf_16:
+                sensor_observations = sensor_observations.to(torch.bfloat16)
             sensor_observations = torch.stack(
                 [
                     torch.cos(sensor_observations[0]),
@@ -519,13 +614,22 @@ class PointNavVC1Net(Net):
                 ],
                 -1,
             )
+            if self.fp_16:
+                compass_observations = compass_observations.half()
+            elif self.bf_16:
+                compass_observations = compass_observations.to(torch.bfloat16)
             x.append(
                 self.compass_embedding(compass_observations.squeeze(dim=1))
             )
 
         if EpisodicGPSSensor.cls_uuid in observations:
+            episode_observations = observations[EpisodicGPSSensor.cls_uuid]
+            if self.fp_16:
+                episode_observations = episode_observations.half()
+            elif self.bf_16:
+                episode_observations = episode_observations.to(torch.bfloat16)
             x.append(
-                self.gps_embedding(observations[EpisodicGPSSensor.cls_uuid])
+                self.gps_embedding(episode_observations)
             )
 
         for uuid in [
@@ -536,6 +640,10 @@ class PointNavVC1Net(Net):
                 goal_image = observations[uuid]
 
                 goal_visual_encoder = getattr(self, f"{uuid}_encoder")
+                if self.fp_16:
+                    goal_image = goal_image.half()
+                elif self.bf_16:
+                    goal_image = goal_image.to(torch.bfloat16)
                 goal_visual_output = goal_visual_encoder({"rgb": goal_image})
                 # logger.info(goal_visual_output.shape)
                 goal_visual_fc = getattr(self, f"{uuid}_fc")
@@ -543,6 +651,10 @@ class PointNavVC1Net(Net):
 
         if CacheImageGoalSensor.cls_uuid in observations:
             goal_embedding = observations[CacheImageGoalSensor.cls_uuid]
+            if self.fp_16:
+                goal_embedding = goal_embedding.half()
+            elif self.bf_16:
+                goal_embedding = goal_embedding.to(torch.bfloat16)
             goal_visual_fc = getattr(self, f"{CacheImageGoalSensor.cls_uuid}_fc")
             x.append(goal_visual_fc(goal_embedding))
 
@@ -550,10 +662,13 @@ class PointNavVC1Net(Net):
             prev_actions = prev_actions.squeeze(-1)
             start_token = torch.zeros_like(prev_actions)
             # The mask means the previous action will be zero, an extra dummy action
-            prev_actions = self.prev_action_embedding(
-                torch.where(masks.view(-1), prev_actions + 1, start_token)
-            )
+            prev_action_mask = torch.where(masks.view(-1), prev_actions + 1, start_token)
+            prev_actions = self.prev_action_embedding(prev_action_mask)
         else:
+            if self.fp_16:
+                prev_actions = prev_actions.half()
+            elif self.bf_16:
+                prev_actions = prev_actions.to(torch.bfloat16)
             prev_actions = self.prev_action_embedding(
                 masks * prev_actions.float()
             )

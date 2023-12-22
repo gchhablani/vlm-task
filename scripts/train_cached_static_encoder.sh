@@ -23,11 +23,11 @@ source /srv/flash1/gchhablani3/miniforge3/etc/profile.d/conda.sh
 conda deactivate
 conda activate vlm_task
 
-TENSORBOARD_DIR="tb/imagenav/vc1_cached_5/seed_1/"
-CHECKPOINT_DIR="data/new_checkpoints/vc1_cached_5/seed_1/"
+TENSORBOARD_DIR="tb/imagenav/vc1_cached_bf_16_static_1/seed_1/"
+CHECKPOINT_DIR="data/new_checkpoints/vc1_cached_bf_16_static_1/seed_1/"
 DATA_PATH="data/datasets/pointnav_gibson_v1/"
 
-JOB_ID="vc1_cached_5"
+JOB_ID="vc1_cached_bf_16_static_1"
 WB_ENTITY="gchhablani"
 PROJECT_NAME="vlm"
 
@@ -49,3 +49,4 @@ srun python -um vlm.run \
   habitat_baselines.checkpoint_folder=${CHECKPOINT_DIR} \
   habitat.dataset.data_path=${DATA_PATH}/train/train.json.gz \
   habitat.task.measurements.success.success_distance=0.25 \
+  habitat_baselines.rl.ddppo.train_encoder=False \
